@@ -21,6 +21,8 @@ Meteor.ui = Meteor.ui || {};
 // IDEA: hook up after update, through something like onlive, somehow?
 // OR: can we transplant the events???
 
+// focus on SIGNALS: "added", "kill", "update"... list callbacks?
+
 (function() {
 
   var walkRanges = function(frag, originalHtml, idToChunk) {
@@ -159,9 +161,13 @@ Meteor.ui = Meteor.ui || {};
 
     var liveChunks = walkRanges(frag, html, idToChunk);
 
+    _.each(liveChunks, function(ch) {
+      ch._send("added"); // first message in the chunk's queue!
+    });
+
     return {frag:frag, liveChunks:liveChunks};
 
-    // XXX caller must attach events and call onlive later
+    // XXX caller must attach events later
   };
 
   var patchContents = function(chunk, frag) {
@@ -185,7 +191,6 @@ Meteor.ui = Meteor.ui || {};
     });
     _.each(result.liveChunks, function(c) {
       attach_events(c.range);
-      c.onlive();
     });
 
     return result.frag;
@@ -220,15 +225,14 @@ Meteor.ui = Meteor.ui || {};
       // XXX duplicated
       _.each(result.liveChunks, function(x) {
         attach_events(x.range);
-        x.onlive();
       });
     };
 
     if (options) {
       if (options.onupdate)
         c.onupdate = options.onupdate;
-      if (options.onlive)
-        c.onlive = options.onlive;
+      if (options.onadded)
+        c.onadded = options.onadded;
       if (options.onkill)
         c.onkill = options.onkill;
     }
@@ -261,7 +265,15 @@ Meteor.ui = Meteor.ui || {};
       };
     };
 
-    var onlive = function() {
+    var oninit = function() {
+      var self = this;
+      // update this chunk when a data callback happens
+      receiver.oncallback = function () {
+        self.update();
+      };
+    };
+
+    var onadded = function() {
       var self = this;
 
       var chunkList = self.childChunks();
@@ -272,18 +284,14 @@ Meteor.ui = Meteor.ui || {};
         self.docChunks = [];
         self.elseChunk = chunkList[0];
       }
-
-      // update this chunk when a data callback happens
-      receiver.oncallback = function () {
-        self.update();
-      };
     };
 
     var onupdate = function() {
       var self = this;
 
       var docChunk = function(doc) {
-        // XXX this is weird
+        // XXX this is weird.
+        // too hard to get the chunk from Meteor.ui.render.
         var chunk;
         var options = docChunkOptions(doc);
         var oldoninit = options.oninit;
@@ -409,7 +417,7 @@ Meteor.ui = Meteor.ui || {};
       }
       return inner_html;
     }, _.extend({onupdate:onupdate, onkill:onkill,
-                 onlive:onlive}, options));
+                 onadded:onadded, oninit:oninit}, options));
 
     if (! Meteor.ui._render_mode)
       // Just return the HTML.
@@ -559,6 +567,9 @@ Meteor.ui = Meteor.ui || {};
   var Chunk = function(options) {
     var self = this;
 
+    self._msgs = [];
+    self._msgCx = null;
+
     if (options) {
       if (options.data)
         self.data = options.data;
@@ -577,32 +588,63 @@ Meteor.ui = Meteor.ui || {};
       self.data = function() { return constantData; };
     }
 
+    // XXX comment
     // Meteor.deps integration.
     // When self._context is invalidated, recreate it
     // and call self.onupdate().
-    var updated = function() {
-      if ((! self.killed) &&
-          ((! self.range) || _checkOffscreen(self.range)))
+    var ondirty = function() {
+      self._send("update");
+      self._context = new Meteor.deps.Context;
+      self._context.on_invalidate(ondirty);
+    };
+    self._context = new Meteor.deps.Context;
+    self._context.on_invalidate(ondirty);
+  };
+
+  Chunk.prototype._send = function(message) {
+    var self = this;
+
+    self._msgs.push(message);
+
+    var processMessage = function(msg) {
+      if (self.killed)
+        return;
+
+      // If chunk is not onscreen at flush time, any message
+      // is treated like "kill".  All future messages will be
+      // ignored.
+      if (msg === "kill" || (! self.range) || _checkOffscreen(self.range)) {
         self.killed = true;
-      if (self.killed) {
         self._context.invalidate();
         self._context = null;
         self.onkill();
-      } else {
-        self._context = new Meteor.deps.Context;
-        self._context.on_invalidate(updated);
-        self.onupdate();
+        return;
       }
+
+      if (msg === "added")
+        self.onadded();
+      else if (msg === "update")
+        self.onupdate();
     };
-    self._context = new Meteor.deps.Context;
-    self._context.on_invalidate(updated);
+
+    // schedule message to be processed at flush time
+    if (! self._msgCx) {
+      var cx = new Meteor.deps.Context;
+      cx.on_invalidate(function() {
+        self._msgCx = null;
+        var msgs = self._msgs;
+        self._msgs = [];
+
+        _.each(msgs, processMessage);
+      });
+      cx.invalidate();
+      self._msgCx = cx;
+    };
   };
 
   Chunk.prototype.kill = function() {
-    if (! this.killed) {
-      this.killed = true;
-      this.update();
-    }
+    if (! this.killed)
+      this._send("kill");
   };
 
   Chunk.prototype.update = function() {
@@ -613,8 +655,7 @@ Meteor.ui = Meteor.ui || {};
 
   Chunk.prototype.onkill = function() {}; // to override
 
-  // called when we get a range
-  Chunk.prototype.onlive = function() {}; // to override
+  Chunk.prototype.onadded = function() {};
 
   Chunk.prototype.childChunks = function() {
     if (! this.range)
