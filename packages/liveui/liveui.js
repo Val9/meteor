@@ -183,20 +183,34 @@ Meteor.ui = Meteor.ui || {};
     if (Meteor.ui._render_mode)
       throw new Error("Can't nest Meteor.ui.render.");
 
+    return renderChunk(html_func, options).frag;
+  };
+
+  var doUpdate = function(chunk, html_func) {
     var result = renderFragment(function() {
-      return Meteor.ui.chunk(html_func, options);
+      // XXX weird
+      return chunk._context.run(function() {
+        return html_func(chunk.data());
+      });
+    });
+    patchContents(chunk, result.frag);
+  };
+
+  var renderChunk = function(html_func, options) {
+    var chunk;
+    var result = renderFragment(function() {
+      var x = makeChunk(html_func, options);
+      chunk = x.chunk;
+      return x.html;
     });
     _.each(result.liveChunks, function(c) {
       attach_events(c.range);
     });
 
-    return result.frag;
+    return { chunk:chunk, frag: result.frag };
   };
 
-  Meteor.ui.chunk = function(html_func, options) {
-    if (typeof html_func !== "function")
-      throw new Error("Meteor.ui.chunk() requires a function as its first argument.");
-
+  var makeChunk = function(html_func, options) {
     var c = new Chunk(options);
     if (options && options.oninit)
       options.oninit.call(c);
@@ -206,11 +220,13 @@ Meteor.ui = Meteor.ui || {};
 
     if (! Meteor.ui._render_mode)
       // Just return the HTML.
-      return html;
+      return {html: html};
 
     // Reactive case:
 
     c.onupdate = function() {
+      doUpdate(c, html_func);
+      /*
       var result = renderFragment(function() {
         // XXX weird
         return c._context.run(function() {
@@ -218,6 +234,7 @@ Meteor.ui = Meteor.ui || {};
         });
       });
       patchContents(c, result.frag);
+      */
       //attach_events(c.range);
       // XXX duplicated
       //_.each(result.liveChunks, function(x) {
@@ -234,7 +251,15 @@ Meteor.ui = Meteor.ui || {};
         c.onkill = options.onkill;
     }
 
-    return Meteor.ui._ranged_html(html, c);
+    return { chunk: c,
+             html: Meteor.ui._ranged_html(html, c) };
+  };
+
+  Meteor.ui.chunk = function(html_func, options) {
+    if (typeof html_func !== "function")
+      throw new Error("Meteor.ui.chunk() requires a function as its first argument.");
+
+    return makeChunk(html_func, options).html;
   };
 
   Meteor.ui.listChunk = function (observable, doc_func, else_func, options) {
@@ -287,26 +312,11 @@ Meteor.ui = Meteor.ui || {};
       var self = this;
 
       var docChunk = function(doc) {
-        // XXX this is weird.
-        // too hard to get the chunk from Meteor.ui.render.
-        var chunk;
-        var options = docChunkOptions(doc);
-        var oldoninit = options.oninit;
-        options.oninit = function() {
-          oldoninit.call(this);
-          chunk = this;
-        };
-        Meteor.ui.render(doc_func, options);
-        return chunk;
+        return renderChunk(doc_func, docChunkOptions(doc)).chunk;
       };
 
       var elseChunk = function() {
-        var chunk;
-        Meteor.ui.render(else_func,
-                         {oninit: function() {
-                           chunk = this;
-                         }});
-        return chunk;
+        return renderChunk(else_func).chunk;
       };
 
       var insertFrag = function(frag, i) {
