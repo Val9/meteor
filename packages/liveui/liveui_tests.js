@@ -1499,6 +1499,28 @@ Tinytest.add("liveui - event handling", function(test) {
   div.kill();
   Meteor.flush();
 
+  // Test that reactive fragments manually inserted inside
+  // a reactive fragment eventually get wired.
+  event_buf.length = 0;
+  div = OnscreenDiv(Meteor.ui.render(function() {
+    return "<div></div>";
+  }, { events: eventmap("click span", event_buf) }));
+  Meteor.flush();
+  div.node().firstChild.appendChild(Meteor.ui.render(function() {
+    return '<span id="foozy">hello</span>';
+  }));
+  clickElement(getid("foozy"));
+  // implementation has no way to know we've inserted the fragment
+  test.equal(event_buf, []);
+  event_buf.length = 0;
+  Meteor.flush();
+  clickElement(getid("foozy"));
+  // now should be wired up
+  test.equal(event_buf, ['click span']);
+  event_buf.length = 0;
+  div.kill();
+  Meteor.flush();
+
 });
 
 Tinytest.add("liveui - cleanup", function(test) {
