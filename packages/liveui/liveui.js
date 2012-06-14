@@ -170,7 +170,7 @@ Meteor.ui = Meteor.ui || {};
     if (Meteor.ui._render_mode)
       throw new Error("Can't nest Meteor.ui.render.");
 
-    return renderChunk(makeChunk(html_func, options)).frag;
+    return renderChunk(makeChunk(html_func, options));
   };
 
   var doUpdate = function(chunk, html_func) {
@@ -188,7 +188,7 @@ Meteor.ui = Meteor.ui || {};
       attach_events(c.range);
     });
 
-    return { chunk:chunk, frag: result.frag };
+    return result.frag;
   };
 
   var makeChunk = function(html_func, options) {
@@ -262,14 +262,14 @@ Meteor.ui = Meteor.ui || {};
     var handle = observable.observe(receiver);
     receiver.flush_to_array(initialDocs);
 
-    var docChunk = function(doc) {
+    var makeDocChunk = function(doc) {
       var chunk = makeChunk(
         doc_func, {data: function() { return this.doc; }});
       chunk.doc = doc;
       return chunk;
     };
 
-    var elseChunk = function() {
+    var makeElseChunk = function() {
       return makeChunk(else_func);
     };
 
@@ -297,41 +297,18 @@ Meteor.ui = Meteor.ui || {};
           docChunks[i].range.insert_before(frag);
       };
 
-      var insertChunk = function(newChunk, i) {
-        var frag = newChunk.range.containerNode();
-        insertFrag(frag, i);
-        //attach_secondary_events(newChunk.range);
-      };
-
-      var extractChunk = function(chunk) {
-        var frag = chunk.range.extract();
-        if (! frag) {
-          // extract() failed because enclosing LiveRange would
-          // become empty.  to make this method work in general,
-          // do something smart here like replace_contents
-          // on the enclosing range with a comment.
-          throw new Error("Can't extract only subchunk");
-        }
-        return frag;
-      };
-
-      var replaceContents = function(newChunk) {
-        var frag = newChunk.range.containerNode();
-        self.range.replace_contents(frag);
-        //attach_secondary_events(newChunk.range);
-      };
-
       var callbacks = {
         added: function(doc, before_idx) {
-          var addedChunk = renderChunk(docChunk(doc)).chunk;
+          var addedChunk = makeDocChunk(doc);
+          var frag = renderChunk(addedChunk);
 
           if (self.elseChunk) {
             // else case -> one item
             self.elseChunk.kill();
             self.elseChunk = null;
-            replaceContents(addedChunk);
+            self.range.replace_contents(frag);
           } else {
-            insertChunk(addedChunk, before_idx);
+            insertFrag(frag, before_idx);
           }
 
           self.docChunks.splice(before_idx, 0, addedChunk);
@@ -341,12 +318,13 @@ Meteor.ui = Meteor.ui || {};
           if (docChunks.length === 1) {
             // one item -> else case
             docChunks[0].kill();
-            self.elseChunk = renderChunk(elseChunk()).chunk;
-            replaceContents(self.elseChunk);
+            self.elseChunk = makeElseChunk();
+            var frag = renderChunk(self.elseChunk);
+            self.range.replace_contents(frag);
           } else {
             // remove item
             var removedChunk = docChunks[at_idx];
-            extractChunk(removedChunk);
+            removedChunk.range.extract();
             removedChunk.kill();
           }
 
@@ -361,7 +339,7 @@ Meteor.ui = Meteor.ui || {};
           // We know the list has at least two items,
           // at old_idx and new_idx, so `extract` will
           // succeed.
-          var frag = extractChunk(movedChunk);
+          var frag = movedChunk.range.extract();
           // remove chunk from list at old index
           docChunks.splice(old_idx, 1);
 
@@ -394,10 +372,10 @@ Meteor.ui = Meteor.ui || {};
 
       var inner_html;
       if (initialDocs.length === 0) {
-        inner_html = elseChunk()._init();
+        inner_html = makeElseChunk()._init();
       } else {
         inner_html = _.map(initialDocs, function(doc) {
-          return docChunk(doc)._init();
+          return makeDocChunk(doc)._init();
         }).join('');
       }
       return inner_html;
