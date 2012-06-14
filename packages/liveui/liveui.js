@@ -1,28 +1,5 @@
 Meteor.ui = Meteor.ui || {};
 
-//// not all chunks have html_func??
-//// ranged_html -> chunk
-//// merge replace_contents and intelligent_replace, unify cleanup and secondary events?
-//// callbacks processed inside onupdate?
-//// patchContents?
-//// Meteor.ui.chunk with a string?  Route everything through ui.chunk/ui.render?
-
-// Game plan:
-// - renderContents / patch separately
-// - onadded callback instead of onlive (track chunks)
-// - use onadded for secondary event attachment
-
-// events (onlive?) on update??
-
-// render calls Meteor.ui.render; calls Meteor.ui.chunk
-
-// PROBLEM: where to attach_events?  was in renderFragment before,
-// but now needs to be after patchContents.
-// IDEA: hook up after update, through something like onlive, somehow?
-// OR: can we transplant the events???
-
-// focus on SIGNALS: "added", "kill", "update"... list callbacks?
-
 (function() {
 
   var walkRanges = function(frag, originalHtml, idToChunk) {
@@ -122,7 +99,6 @@ Meteor.ui = Meteor.ui || {};
       if (chunk) {
         chunk.range = range;
         range.chunk = chunk;
-        chunk._send("added"); // first message in chunk's queue!
         liveChunks.push(chunk);
       }
 
@@ -132,7 +108,7 @@ Meteor.ui = Meteor.ui || {};
     return liveChunks;
   };
 
-  var renderFragment = function(html_func) {
+  var renderFragment = function(html_func, withEvents) {
 
     var idToChunk = {};
     Meteor.ui._render_mode = {
@@ -153,9 +129,13 @@ Meteor.ui = Meteor.ui || {};
 
     var liveChunks = walkRanges(frag, html, idToChunk);
 
-    return {frag:frag, liveChunks:liveChunks};
+    _.each(liveChunks, function(chunk) {
+      chunk._send("added"); // first message in chunk's queue!
+      if (withEvents)
+        wireEvents(chunk);
+    });
 
-    // XXX caller must attach events later
+    return frag;
   };
 
   // In render mode (i.e. inside Meteor.ui.render), this is an
@@ -173,28 +153,24 @@ Meteor.ui = Meteor.ui || {};
     return renderChunk(makeChunk(html_func, options));
   };
 
-  var doUpdate = function(chunk, html_func) {
-    var result = renderFragment(function() {
-      return html_func.call(chunk, chunk.data());
-    });
-    Meteor.ui._intelligent_replace(chunk.range, result.frag);
-  };
-
   var renderChunk = function(chunk) {
-    var result = renderFragment(function() {
-      return chunk._init();
-    });
-    _.each(result.liveChunks, function(c) {
-      attach_events(c.range);
-    });
-
-    return result.frag;
+    var frag = renderFragment(function() {
+      var html = chunk._init();
+      return html;
+    }, true);
+    chunk._send("render");
+    return frag;
   };
 
   var makeChunk = function(html_func, options) {
     options = _.extend({
       onupdate: function() {
-        doUpdate(this, html_func);
+        var self = this;
+        var frag = renderFragment(function() {
+          return html_func.call(self, self.data());
+        });
+        Meteor.ui._intelligent_replace(self.range, frag);
+        self._send("render");
       },
       oninit: function() {
         return html_func.call(this, this.data());
@@ -202,39 +178,6 @@ Meteor.ui = Meteor.ui || {};
     }, options);
 
     return new Chunk(options);
-
-//    var c = new Chunk(options);
-//    c.oninit = html_func;
-
-    ///var html = c._init();
-    ///
-    ///if (typeof html !== "string")
-    ///throw new Error("Render function must return a string");
-
-
-    // Reactive case:
-
-//    c.onupdate = function() {
-//      doUpdate(c, html_func);
-      /*
-      var result = renderFragment(function() {
-        // XXX weird
-        return c._context.run(function() {
-          return html_func(c.data());
-        });
-      });
-      patchContents(c, result.frag);
-      */
-      //attach_events(c.range);
-      // XXX duplicated
-      //_.each(result.liveChunks, function(x) {
-      //attach_events(x.range);
-      //});
-//    };
-
-    //return { chunk: c,
-    //html: Meteor.ui._ranged_html(html, c) };
-//    return c;
   };
 
   Meteor.ui.chunk = function(html_func, options) {
@@ -287,6 +230,9 @@ Meteor.ui = Meteor.ui || {};
     };
 
     var onupdate = function() {
+      // override the normal behavior (of recalculating
+      // and smart-patching the whole contents of the chunk)
+
       var self = this;
 
       var insertFrag = function(frag, i) {
@@ -361,14 +307,10 @@ Meteor.ui = Meteor.ui || {};
       handle.stop();
     };
 
-    var html = Meteor.ui.chunk(function() {
-      var self = this;
+    var outerChunk;
 
-      // XXX this code is run on every update!
-      // update this chunk when a data callback happens
-      receiver.oncallback = function () {
-        self.update();
-      };
+    var html = Meteor.ui.chunk(function() {
+      outerChunk = this;
 
       var inner_html;
       if (initialDocs.length === 0) {
@@ -386,8 +328,14 @@ Meteor.ui = Meteor.ui || {};
       // Just return the HTML.
       handle.stop();
 
-    return html;
+    // Have observer callbacks trigger an update of our chunk.
+    // We don't have to wait to set this up, as the chunk
+    // won't update until after it's added anyway.
+    receiver.oncallback = function () {
+      outerChunk.update();
+    };
 
+    return html;
   };
 
 
@@ -426,7 +374,8 @@ Meteor.ui = Meteor.ui || {};
     cx.on_invalidate(function() {
       --frag._liveui_refs;
       if (! frag._liveui_refs)
-        cleanup_frag(frag);
+        // wrap the frag in a new LiveRange that will be destroyed
+        cleanup_range(new Meteor.ui._LiveRange(Meteor.ui._tag, frag));
     });
     cx.invalidate();
   };
@@ -512,8 +461,6 @@ Meteor.ui = Meteor.ui || {};
       Meteor.ui._LiveRange.transplant_tag(Meteor.ui._tag, t, s);
     };
 
-    //tgtRange.replace_contents(srcParent);
-
     tgtRange.operate(function(start, end) {
       // clear all LiveRanges on target
       cleanup_range(new Meteor.ui._LiveRange(Meteor.ui._tag, start, end));
@@ -523,13 +470,41 @@ Meteor.ui = Meteor.ui || {};
         start.previousSibling, end.nextSibling);
       patcher.diffpatch(copyFunc);
     });
-
-    //attach_secondary_events(tgtRange);
   };
 
-  var wireEvents = function(chunk) {
-    attach_events(chunk.range);
-    attach_secondary_events(chunk.range);
+  var wireEvents = function(chunk, andEnclosing) {
+    // Attach events to top-level nodes in `chunk` as specified
+    // by its event handlers.
+    //
+    // If `andEnclosing` is true, we also walk up the chunk
+    // hierarchy looking for event types we need to handle
+    // based on handlers in ancestor chunks.  This is necessary
+    // when a chunk is updated or a rendered fragment is added
+    // to the DOM -- basically, when a chunk acquires ancestors.
+    //
+    // In modern browsers (all except IE <= 8), this level of
+    // subtlety is not actually required, because the implementation
+    // of Meteor.ui._event.registerEventType binds one handler
+    // per type globally on the document.  However, the Old IE impl
+    // takes advantage of it.
+
+    var range = chunk.range;
+
+    for(var c = chunk; c; c = c.parentChunk()) {
+      var handlers = c.event_handlers;
+
+      if (handlers) {
+        _.each(handlers.types, function(t) {
+          for(var n = range.firstNode(), after = range.lastNode().nextSibling;
+              n && n !== after;
+              n = n.nextSibling)
+            Meteor.ui._event.registerEventType(t, n);
+        });
+      }
+
+      if (! andEnclosing)
+        break;
+    }
   };
 
   var Chunk = function(options) {
@@ -565,10 +540,12 @@ Meteor.ui = Meteor.ui || {};
       self.data = function() { return constantData; };
     }
 
-    // XXX comment
-    // Meteor.deps integration.
-    // When self._context is invalidated, recreate it
-    // and call self.onupdate().
+    // Allow Meteor.deps to signal us about a data change by
+    // invalidating self._context.  By the time we see the
+    // invalidation, it's flush time.  We immediately set up
+    // a new context for next time.
+    // Always having the latest context in an instance variable
+    // makes clean-up easier.
     var ondirty = function() {
       self._send("update");
       self._context = new Meteor.deps.Context;
@@ -604,18 +581,29 @@ Meteor.ui = Meteor.ui || {};
       // is treated like "kill".  All future messages will be
       // ignored.
       if (msg === "kill" || (! self.range) || _checkOffscreen(self.range)) {
+        // Pronounce this chunk dead.  We rely on this finalization to clean
+        // up the deps context, which is first created in the constructor.
+        // There are many ways for a chunk to die -- never rendered, never
+        // added to the DOM, removed as part of an update, removed
+        // surreptitiously -- but all roads lead here.
         self.killed = true;
         self._context.invalidate();
         self._context = null;
         self.onkill();
       } else if (msg === "added") {
+        // This chunk is part of the document for the first time.
         wireEvents(self);
         self.onadded();
       } else if (msg === "update") {
+        // Rerender this chunk in place, in whole or in part.
         self._context.run(function() {
           self.onupdate();
         });
-        wireEvents(self);
+      } else if (msg === "render") {
+        // This chunk is the root of a Meteor.ui.render or a reactive
+        // update.  Its descendent nodes are (most likely) new to the
+        // document.
+        wireEvents(self, true);
       }
     };
 
@@ -635,18 +623,23 @@ Meteor.ui = Meteor.ui || {};
   };
 
   Chunk.prototype.kill = function() {
+    // schedule killing for flush time.
     if (! this.killed)
       this._send("kill");
   };
 
   Chunk.prototype.update = function() {
+    // invalidate the context, as if a data dependency changed.
+    // we'll get an "update" message at flush time.
     this._context.invalidate();
   };
 
+  // default callbacks to be overriden
   Chunk.prototype.oninit = function() { return ""; };
   Chunk.prototype.onupdate = function() {};
   Chunk.prototype.onkill = function() {};
   Chunk.prototype.onadded = function() {};
+
 
   Chunk.prototype.childChunks = function() {
     if (! this.range)
@@ -732,63 +725,16 @@ Meteor.ui = Meteor.ui || {};
       "<!-- ENDRANGE_"+commentId+" -->";
   };
 
-  var cleanup_frag = function(frag) {
-    // wrap the frag in a new LiveRange that will be destroyed
-    cleanup_range(new Meteor.ui._LiveRange(Meteor.ui._tag, frag));
-  };
-
-  // XXX rewrite comment
-  // Cleans up a range and its descendant ranges by calling
-  // killContext on them (which removes any associated context
-  // from dependency tracking) and then destroy (which removes
-  // the liverange data from the DOM).
+  // Cleans up a range and its descendant ranges by killing
+  // any attached chunks (which removes the associated contexts
+  // from dependency tracking) and then destroying the LiveRanges
+  // (which removes the liverange data from the DOM).
   var cleanup_range = function(range) {
     range.visit(function(is_start, range) {
       if (is_start)
         range.chunk && range.chunk.kill();
     });
     range.destroy(true);
-  };
-
-  // Attach events specified by `range` to top-level nodes in `range`.
-  // The nodes may still be in a DocumentFragment.
-  var attach_events = function(range) {
-    var handlers = range.chunk && range.chunk.event_handlers;
-    if (! handlers)
-      return;
-
-    _.each(handlers.types, function(t) {
-      for(var n = range.firstNode(), after = range.lastNode().nextSibling;
-          n && n !== after;
-          n = n.nextSibling)
-        Meteor.ui._event.registerEventType(t, n);
-    });
-  };
-
-  // Attach events specified by enclosing ranges of `range`, at the
-  // same DOM level, to nodes in `range`.  This is necessary if
-  // `range` has just been inserted (as in the case of list 'added'
-  // events) or if it has been re-rendered but its enclosing ranges
-  // haven't.  In either case, the nodes in `range` have been rendered
-  // without taking enclosing ranges into account, so additional event
-  // handlers need to be attached.
-  var attach_secondary_events = function(range) {
-    // Implementations of LiveEvents that use whole-document event capture
-    // (all except old IE) don't actually need any of this; this function
-    // could be a no-op.
-    for(var r = range.findParent(); r; r = r.findParent()) {
-      var handlers = r.chunk && r.chunk.event_handlers;
-      if (! handlers)
-        continue;
-
-      var eventTypes = handlers.types;
-      _.each(eventTypes, function(t) {
-        for(var n = range.firstNode(), after = range.lastNode().nextSibling;
-            n && n !== after;
-            n = n.nextSibling)
-          Meteor.ui._event.registerEventType(t, n);
-      });
-    }
   };
 
   // Handle a currently-propagating event on a particular node.
