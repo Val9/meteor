@@ -199,12 +199,6 @@ Meteor.ui = Meteor.ui || {};
     else_func = (typeof else_func === "function" ? else_func :
                  function() { return ""; });
 
-    var initialDocs = [];
-    var receiver = new Meteor.ui._CallbackReceiver();
-
-    var handle = observable.observe(receiver);
-    receiver.flush_to_array(initialDocs);
-
     var makeDocChunk = function(doc) {
       var chunk = makeChunk(
         doc_func, {data: function() { return this.doc; }});
@@ -216,126 +210,122 @@ Meteor.ui = Meteor.ui || {};
       return makeChunk(else_func);
     };
 
-    var onadded = function() {
-      var self = this;
+    var docChunks = [];
+    var elseChunk = makeElseChunk();
+    var outerChunk = null;
 
-      var chunkList = self.childChunks();
-      if (initialDocs.length) {
-        self.docChunks = chunkList;
-        self.elseChunk = null;
-      } else {
-        self.docChunks = [];
-        self.elseChunk = chunkList[0];
-      }
+    var queuedUpdates = [];
+    var enqueue = function(f) {
+      queuedUpdates.push(f);
+      outerChunk && outerChunk.update();
+    };
+    var runQueuedUpdates = function() {
+      _.each(queuedUpdates, function(qu) { qu(); });
+      queuedUpdates.length = 0;
     };
 
-    var onupdate = function() {
-      // override the normal behavior (of recalculating
-      // and smart-patching the whole contents of the chunk)
+    var insertFrag = function(frag, i) {
+      if (i === docChunks.length)
+        docChunks[i-1].range.insert_after(frag);
+      else
+        docChunks[i].range.insert_before(frag);
+    };
 
-      var self = this;
-
-      var insertFrag = function(frag, i) {
-        var docChunks = self.docChunks;
-        if (i === docChunks.length)
-          docChunks[i-1].range.insert_after(frag);
-        else
-          docChunks[i].range.insert_before(frag);
-      };
-
-      var callbacks = {
-        added: function(doc, before_idx) {
+    var handle = observable.observe({
+      added: function(doc, before_idx) {
+        enqueue(function() {
           var addedChunk = makeDocChunk(doc);
-          var frag = renderChunk(addedChunk);
 
-          if (self.elseChunk) {
-            // else case -> one item
-            self.elseChunk.kill();
-            self.elseChunk = null;
-            self.range.replace_contents(frag);
-          } else {
-            insertFrag(frag, before_idx);
+          if (outerChunk) {
+            console.log(doc);
+            debugger;
+            var frag = renderChunk(addedChunk);
+            if (elseChunk)
+              // else case -> one item
+              outerChunk.range.replace_contents(frag);
+            else
+              insertFrag(frag, before_idx);
           }
 
-          self.docChunks.splice(before_idx, 0, addedChunk);
-        },
-        removed: function(doc, at_idx) {
-          var docChunks = self.docChunks;
-          if (docChunks.length === 1) {
-            // one item -> else case
-            docChunks[0].kill();
-            self.elseChunk = makeElseChunk();
-            var frag = renderChunk(self.elseChunk);
-            self.range.replace_contents(frag);
-          } else {
-            // remove item
-            var removedChunk = docChunks[at_idx];
-            removedChunk.range.extract();
-            removedChunk.kill();
+          elseChunk && elseChunk.kill();
+          elseChunk = null;
+          docChunks.splice(before_idx, 0, addedChunk);
+        });
+      },
+      removed: function(doc, at_idx) {
+        enqueue(function() {
+          if (outerChunk) {
+            if (docChunks.length === 1) {
+              // one item -> else case
+              elseChunk = makeElseChunk();
+              var frag = renderChunk(elseChunk);
+              outerChunk.range.replace_contents(frag);
+            } else {
+              // remove item
+              var removedChunk = docChunks[at_idx];
+              removedChunk.range.extract();
+            }
           }
 
-          docChunks.splice(at_idx, 1);
-        },
-        moved: function(doc, old_idx, new_idx) {
+          docChunks.splice(at_idx, 1)[0].kill();
+        });
+      },
+      moved: function(doc, old_idx, new_idx) {
+        enqueue(function() {
           if (old_idx === new_idx)
             return;
 
-          var docChunks = self.docChunks;
           var movedChunk = docChunks[old_idx];
-          // We know the list has at least two items,
-          // at old_idx and new_idx, so `extract` will
-          // succeed.
-          var frag = movedChunk.range.extract();
-          // remove chunk from list at old index
+          var frag;
+          if (outerChunk) {
+            // We know the list has at least two items,
+            // at old_idx and new_idx, so `extract` will
+            // succeed.
+            var frag = movedChunk.range.extract();
+            // remove chunk from list at old index
+          }
           docChunks.splice(old_idx, 1);
 
-          insertFrag(frag, new_idx);
+          if (outerChunk)
+            insertFrag(frag, new_idx);
+
           // insert chunk into list at new index
           docChunks.splice(new_idx, 0, movedChunk);
-        },
-        changed: function(doc, at_idx) {
-          var chunk = self.docChunks[at_idx];
+        });
+      },
+      changed: function(doc, at_idx) {
+        enqueue(function() {
+          var chunk = docChunks[at_idx];
           chunk.doc = doc;
-          chunk.update();
-        }
-      };
+          if (outerChunk)
+            chunk.update();
+        });
+      }
+    });
 
-      receiver.flush_to(callbacks);
+    runQueuedUpdates();
+
+    options = options || {};
+
+    options.onupdate = function() {
+      // override the normal behavior (of recalculating
+      // and smart-patching the whole contents of the chunk)
+      runQueuedUpdates();
     };
 
-    var onkill = function() {
+    options.onkill = function() {
       handle.stop();
     };
 
-    var outerChunk;
-
-    var html = Meteor.ui.chunk(function() {
+    return Meteor.ui.chunk(function() {
       outerChunk = this;
 
-      var inner_html;
-      if (initialDocs.length === 0) {
-        inner_html = makeElseChunk()._init();
-      } else {
-        inner_html = _.map(initialDocs, function(doc) {
-          return makeDocChunk(doc)._init();
-        }).join('');
-      }
-      return inner_html;
-    }, _.extend({onupdate:onupdate, onkill:onkill,
-                 onadded:onadded}, options));
+      return _.map(
+        (elseChunk ? [elseChunk] : docChunks),
+        function(ch) { return ch._init(); }).join('');
 
-    if (! Meteor.ui._render_mode)
-      // Just return the HTML.
-      handle.stop();
+    }, options);
 
-    // Have observer callbacks trigger an update of our chunk.
-    // We don't have to wait to set this up, as the chunk
-    // won't update until after it's added anyway.
-    receiver.oncallback = function () {
-      outerChunk.update();
-    };
-
-    return html;
   };
 
 
@@ -399,47 +389,6 @@ Meteor.ui = Meteor.ui || {};
       return document.body.contains(node);
     }
   };
-
-  var CallbackReceiver = function() {
-    var self = this;
-
-    self.queue = [];
-    self.deps = {};
-
-    // attach these callback funcs to each instance, as they may
-    // not be called as methods by livedata.
-    _.each(["added", "removed", "moved", "changed"], function (name) {
-      self[name] = function (/* arguments */) {
-        self.queue.push([name].concat(_.toArray(arguments)));
-        self.oncallback();
-      };
-    });
-  };
-
-  Meteor.ui._CallbackReceiver = CallbackReceiver;
-
-  CallbackReceiver.prototype.flush_to = function(t) {
-    // fire all queued events on new target
-    _.each(this.queue, function(x) {
-      var name = x[0];
-      var args = x.slice(1);
-      t[name].apply(t, args);
-    });
-    this.queue.length = 0;
-  };
-  CallbackReceiver.prototype.flush_to_array = function(array) {
-    // apply all queued events to array
-    _.each(this.queue, function(x) {
-      switch (x[0]) {
-      case 'added': array.splice(x[2], 0, x[1]); break;
-      case 'removed': array.splice(x[2], 1); break;
-      case 'moved': array.splice(x[3], 0, array.splice(x[2], 1)[0]); break;
-      case 'changed': array[x[2]] = x[1]; break;
-      }
-    });
-    this.queue.length = 0;
-  };
-  CallbackReceiver.prototype.oncallback = function() {}; // to override
 
   // Performs a replacement by determining which nodes should
   // be preserved and invoking Meteor.ui._Patcher as appropriate.
@@ -565,7 +514,19 @@ Meteor.ui = Meteor.ui || {};
     if (typeof html !== "string")
       throw new Error("Render function must return a string");
 
-    return Meteor.ui._ranged_html(html, self);
+    var render_mode = Meteor.ui._render_mode;
+
+    if (! render_mode) {
+      // no reactivity possible, so kill the chunk (on next flush)
+      self.kill();
+      return html;
+    }
+
+    var commentId = render_mode.nextId ++;
+    render_mode.idToChunk[commentId] = self;
+
+    return "<!-- STARTRANGE_"+commentId+" -->" + html +
+      "<!-- ENDRANGE_"+commentId+" -->";
   };
 
   Chunk.prototype._send = function(message) {
@@ -709,20 +670,6 @@ Meteor.ui = Meteor.ui || {};
 
     handlers.types = _.keys(eventTypeSet);
     return handlers;
-  };
-
-  Meteor.ui._ranged_html = function(html, chunk) {
-    if (! Meteor.ui._render_mode)
-      return html;
-
-    var idToChunk = Meteor.ui._render_mode.idToChunk;
-    var commentId = Meteor.ui._render_mode.nextId ++;
-
-    if (chunk)
-      idToChunk[commentId] = chunk;
-
-    return "<!-- STARTRANGE_"+commentId+" -->" + html +
-      "<!-- ENDRANGE_"+commentId+" -->";
   };
 
   // Cleans up a range and its descendant ranges by killing

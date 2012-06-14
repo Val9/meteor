@@ -847,7 +847,9 @@ Tinytest.add("liveui - listChunk stop", function(test) {
     return "#"+doc._id;
   });
   test.equal(result, "#123#456");
-  test.equal(numHandles, 0); // listChunk called handle.stop();
+  Meteor.flush();
+  // chunk killed because not created inside Meteor.ui.render
+  test.equal(numHandles, 0);
 
 
   var R = ReactiveVar(1);
