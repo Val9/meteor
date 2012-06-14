@@ -122,6 +122,7 @@ Meteor.ui = Meteor.ui || {};
       if (chunk) {
         chunk.range = range;
         range.chunk = chunk;
+        chunk._send("added"); // first message in chunk's queue!
         liveChunks.push(chunk);
       }
 
@@ -160,10 +161,6 @@ Meteor.ui = Meteor.ui || {};
       frag.appendChild(document.createComment("empty"));
 
     var liveChunks = walkRanges(frag, html, idToChunk);
-
-    _.each(liveChunks, function(ch) {
-      ch._send("added"); // first message in the chunk's queue!
-    });
 
     return {frag:frag, liveChunks:liveChunks};
 
@@ -221,11 +218,11 @@ Meteor.ui = Meteor.ui || {};
         });
       });
       patchContents(c, result.frag);
-      attach_events(c.range);
+      //attach_events(c.range);
       // XXX duplicated
-      _.each(result.liveChunks, function(x) {
-        attach_events(x.range);
-      });
+      //_.each(result.liveChunks, function(x) {
+      //attach_events(x.range);
+      //});
     };
 
     if (options) {
@@ -323,7 +320,7 @@ Meteor.ui = Meteor.ui || {};
       var insertChunk = function(newChunk, i) {
         var frag = newChunk.range.containerNode();
         insertFrag(frag, i);
-        attach_secondary_events(newChunk.range);
+        //attach_secondary_events(newChunk.range);
       };
 
       var extractChunk = function(chunk) {
@@ -341,7 +338,7 @@ Meteor.ui = Meteor.ui || {};
       var replaceContents = function(newChunk) {
         var frag = newChunk.range.containerNode();
         self.range.replace_contents(frag);
-        attach_secondary_events(newChunk.range);
+        //attach_secondary_events(newChunk.range);
       };
 
       var callbacks = {
@@ -561,7 +558,12 @@ Meteor.ui = Meteor.ui || {};
       patcher.diffpatch(copyFunc);
     });
 
-    attach_secondary_events(tgtRange);
+    //attach_secondary_events(tgtRange);
+  };
+
+  var wireEvents = function(chunk) {
+    attach_events(chunk.range);
+    attach_secondary_events(chunk.range);
   };
 
   var Chunk = function(options) {
@@ -618,13 +620,13 @@ Meteor.ui = Meteor.ui || {};
         self._context.invalidate();
         self._context = null;
         self.onkill();
-        return;
-      }
-
-      if (msg === "added")
+      } else if (msg === "added") {
+        wireEvents(self);
         self.onadded();
-      else if (msg === "update")
+      } else if (msg === "update") {
         self.onupdate();
+        wireEvents(self);
+      }
     };
 
     // schedule message to be processed at flush time
