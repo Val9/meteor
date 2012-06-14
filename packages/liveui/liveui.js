@@ -132,15 +132,6 @@ Meteor.ui = Meteor.ui || {};
     return liveChunks;
   };
 
-  var renderHtml = function(html_func, context) {
-    var html = context.run(html_func);
-
-    if (typeof html !== "string")
-      throw new Error("Render function must return a string");
-
-    return html;
-  };
-
   var renderFragment = function(html_func) {
 
     var idToChunk = {};
@@ -167,10 +158,6 @@ Meteor.ui = Meteor.ui || {};
     // XXX caller must attach events later
   };
 
-  var patchContents = function(chunk, frag) {
-    Meteor.ui._intelligent_replace(chunk.range, frag);
-  };
-
   // In render mode (i.e. inside Meteor.ui.render), this is an
   // object, otherwise it is null.
   // callbacks: id -> func, where id ranges from 1 to callbacks._count.
@@ -188,12 +175,9 @@ Meteor.ui = Meteor.ui || {};
 
   var doUpdate = function(chunk, html_func) {
     var result = renderFragment(function() {
-      // XXX weird
-      return chunk._context.run(function() {
-        return html_func(chunk.data());
-      });
+      return html_func(chunk.data());
     });
-    patchContents(chunk, result.frag);
+    Meteor.ui._intelligent_replace(chunk.range, result.frag);
   };
 
   var renderChunk = function(html_func, options) {
@@ -215,8 +199,12 @@ Meteor.ui = Meteor.ui || {};
     if (options && options.oninit)
       options.oninit.call(c);
 
-    var html = renderHtml(
-      _.bind(html_func, null, c.data()), c._context);
+    var html = c._context.run(function() {
+      return html_func(c.data());
+    });
+
+    if (typeof html !== "string")
+      throw new Error("Render function must return a string");
 
     if (! Meteor.ui._render_mode)
       // Just return the HTML.
@@ -634,7 +622,9 @@ Meteor.ui = Meteor.ui || {};
         wireEvents(self);
         self.onadded();
       } else if (msg === "update") {
-        self.onupdate();
+        self._context.run(function() {
+          self.onupdate();
+        });
         wireEvents(self);
       }
     };
