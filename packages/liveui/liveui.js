@@ -2,7 +2,11 @@ Meteor.ui = Meteor.ui || {};
 
 (function() {
 
-  var walkRanges = function(frag, originalHtml, idToChunk) {
+  Meteor.ui._inRenderMode = false;
+
+  var newChunksById = {};
+
+  var walkRanges = function(frag, originalHtml) {
     // Helper that invokes `f` on every comment node under `parent`.
     // If `f` returns a node, visit that node next.
     var each_comment = function(parent, f) {
@@ -19,10 +23,9 @@ Meteor.ui = Meteor.ui || {};
 
     // walk comments and create ranges
     var rangeStartNodes = {};
-    var liveChunks = [];
     each_comment(frag, function(n) {
 
-      var rangeCommentMatch = /^\s*(START|END)RANGE_(\S+)/.exec(n.nodeValue);
+      var rangeCommentMatch = /^\s*(START|END)CHUNK_(\S+)/.exec(n.nodeValue);
       if (! rangeCommentMatch)
         return null;
 
@@ -74,16 +77,16 @@ Meteor.ui = Meteor.ui || {};
           endNode = startNode.parentNode.lastChild;
         } else {
           var html = originalHtml;
-          var r = new RegExp('<!--\\s*STARTRANGE_'+id+'.*?-->', 'g');
+          var r = new RegExp('<!--\\s*STARTCHUNK_'+id+'.*?-->', 'g');
           var match = r.exec(html);
           var help = "";
           if (match) {
             var comment_end = r.lastIndex;
             var comment_start = comment_end - match[0].length;
             var stripped_before = html.slice(0, comment_start).replace(
-                /<!--\s*(START|END)RANGE.*?-->/g, '');
+                /<!--\s*(START|END)CHUNK.*?-->/g, '');
             var stripped_after = html.slice(comment_end).replace(
-                /<!--\s*(START|END)RANGE.*?-->/g, '');
+                /<!--\s*(START|END)CHUNK.*?-->/g, '');
             var context_amount = 50;
             var context = stripped_before.slice(-context_amount) +
                   stripped_after.slice(0, context_amount);
@@ -95,77 +98,63 @@ Meteor.ui = Meteor.ui || {};
       }
 
       var range = new Meteor.ui._LiveRange(Meteor.ui._tag, startNode, endNode);
-      var chunk = idToChunk[id];
+      var chunk = newChunksById[id];
       if (chunk) {
         chunk._range = range;
         range.chunk = chunk;
-        liveChunks.push(chunk);
       }
 
       return next;
     });
-
-    return liveChunks;
   };
 
-  var renderFragment = function(html_func, withEvents) {
+  // XXX don't like the term "render" or the name "html_func"
+  // (which should only be used for Meteor.ui.render/chunk)
+  var renderFragment = function(func, withEvents) {
 
-    var idToChunk = {};
-    Meteor.ui._render_mode = {
-      nextId: 1,
-      idToChunk: idToChunk
-    };
+    Meteor.ui._inRenderMode = true;
 
     var html;
     try {
-      html = html_func();
+      html = func();
     } finally {
-      Meteor.ui._render_mode = null;
+      Meteor.ui._inRenderMode = false;
     }
 
     var frag = Meteor.ui._htmlToFragment(html);
     if (! frag.firstChild)
       frag.appendChild(document.createComment("empty"));
 
-    var liveChunks = walkRanges(frag, html, idToChunk);
+    walkRanges(frag, html);
 
-    _.each(liveChunks, function(chunk) {
-      chunk._send("added"); // first message in chunk's queue!
-      if (withEvents)
-        wireEvents(chunk);
+    _.each(newChunksById, function(chunk) {
+      if (chunk._range) {
+        chunk._send("added");
+        if (withEvents)
+          wireEvents(chunk);
+      }
     });
+
+    newChunksById = {};
 
     return frag;
   };
-
-  // In render mode (i.e. inside Meteor.ui.render), this is an
-  // object, otherwise it is null.
-  // callbacks: id -> func, where id ranges from 1 to callbacks._count.
-  Meteor.ui._render_mode = null;
 
   Meteor.ui.render = function (html_func, options) {
     if (typeof html_func !== "function")
       throw new Error("Meteor.ui.render() requires a function as its first argument.");
 
-    if (Meteor.ui._render_mode)
+    if (Meteor.ui._inRenderMode)
       throw new Error("Can't nest Meteor.ui.render.");
 
-    return renderChunk(new Chunk(html_func, options));
-  };
-
-  var renderChunk = function(chunk) {
-    var frag = renderFragment(function() {
-      return chunk._init();
-    }, true);
-    chunk._send("render");
-    return frag;
+    return new Chunk(html_func, options)._asFragment();
   };
 
   Meteor.ui.chunk = function(html_func, options) {
     if (typeof html_func !== "function")
       throw new Error("Meteor.ui.chunk() requires a function as its first argument.");
 
-    return new Chunk(html_func, options)._init();
+    return new Chunk(html_func, options)._asHtml();
   };
 
   Meteor.ui.listChunk = function (observable, doc_func, else_func, options) {
@@ -207,7 +196,7 @@ Meteor.ui = Meteor.ui || {};
           var addedChunk = new Chunk(doc_func, {data: doc});
 
           if (outerChunk) {
-            var frag = renderChunk(addedChunk);
+            var frag = addedChunk._asFragment();
             if (elseChunk)
               // else case -> one item
               outerChunk._range.replace_contents(frag);
@@ -226,7 +215,7 @@ Meteor.ui = Meteor.ui || {};
             if (docChunks.length === 1) {
               // one item -> else case
               elseChunk = new Chunk(else_func);
-              var frag = renderChunk(elseChunk);
+              var frag = elseChunk._asFragment();
               outerChunk._range.replace_contents(frag);
             } else {
               // remove item
@@ -276,7 +265,7 @@ Meteor.ui = Meteor.ui || {};
     outerChunk = new Chunk(function() {
       return _.map(
         (elseChunk ? [elseChunk] : docChunks),
-        function(ch) { return ch._init(); }).join('');
+        function(ch) { return ch._asHtml(); }).join('');
     }, options);
 
     outerChunk.onupdate = function() {
@@ -289,7 +278,7 @@ Meteor.ui = Meteor.ui || {};
       handle.stop();
     };
 
-    return outerChunk._init();
+    return outerChunk._asHtml();
   };
 
 
@@ -426,7 +415,9 @@ Meteor.ui = Meteor.ui || {};
     options = options || {};
 
     self._range = null;
-    self._htmlfunc = html_func;
+    self._calculate = function() {
+      return html_func(this._data);
+    };
     self._msgs = [];
     self._msgCx = null;
     self._data = (options.data || options.event_data || null); // XXX
@@ -448,31 +439,49 @@ Meteor.ui = Meteor.ui || {};
     };
     self._context = new Meteor.deps.Context;
     self._context.on_invalidate(ondirty);
+
+    // use original Context's unique id as our Chunk's unique id
+    self.id = self._context.id;
   };
 
-  Chunk.prototype._init = function() {
+  Chunk.prototype._asHtml = function() {
     var self = this;
 
     var html = self._context.run(function() {
-      return self.calculate();
+      return self._calculate();
     });
 
     if (typeof html !== "string")
       throw new Error("Render function must return a string");
 
-    var render_mode = Meteor.ui._render_mode;
-
-    if (! render_mode) {
+    if (! Meteor.ui._inRenderMode) {
       // no reactivity possible, so kill the chunk (on next flush)
       self.kill();
       return html;
+    } else {
+      var id = self.id;
+      newChunksById[id] = self;
+      return "<!-- STARTCHUNK_"+id+" -->" + html +
+        "<!-- ENDCHUNK_"+id+" -->";
     }
+  };
 
-    var commentId = render_mode.nextId ++;
-    render_mode.idToChunk[commentId] = self;
+  Chunk.prototype._asFragment = function() {
+    var self = this;
+    var frag = renderFragment(function() {
+      return self._asHtml();
+    }, true);
+    self._send("render");
+    return frag;
+  };
 
-    return "<!-- STARTRANGE_"+commentId+" -->" + html +
-      "<!-- ENDRANGE_"+commentId+" -->";
+  Chunk.prototype.onupdate = function() {
+    var self = this;
+    var frag = renderFragment(function() {
+      return self._calculate();
+    });
+    Meteor.ui._intelligent_replace(self._range, frag);
+    self._send("render");
   };
 
   Chunk.prototype._send = function(message) {
@@ -540,20 +549,6 @@ Meteor.ui = Meteor.ui || {};
     // we'll get an "update" message at flush time.
     this._context.invalidate();
   };
-
-  Chunk.prototype.calculate = function() {
-    return this._htmlfunc(this._data);
-  };
-
-  Chunk.prototype.onupdate = function() {
-    var self = this;
-    var frag = renderFragment(function() {
-      return self.calculate();
-    });
-    Meteor.ui._intelligent_replace(self._range, frag);
-    self._send("render");
-  };
-
 
   Chunk.prototype.childChunks = function() {
     if (! this._range)
