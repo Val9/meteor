@@ -6,7 +6,23 @@ Meteor.ui = Meteor.ui || {};
 
   var newChunksById = {};
 
-  var walkRanges = function(frag, originalHtml) {
+  var materialize = function(calcHtml, chunkCallback) {
+
+    Meteor.ui._inRenderMode = true;
+
+    var html;
+    try {
+      html = calcHtml();
+    } finally {
+      Meteor.ui._inRenderMode = false;
+    }
+
+    var frag = Meteor.ui._htmlToFragment(html);
+    if (! frag.firstChild)
+      frag.appendChild(document.createComment("empty"));
+
+    var materializedChunks = [];
+
     // Helper that invokes `f` on every comment node under `parent`.
     // If `f` returns a node, visit that node next.
     var each_comment = function(parent, f) {
@@ -76,7 +92,6 @@ Meteor.ui = Meteor.ui || {};
                    endNode === startNode.parentNode.nextSibling) {
           endNode = startNode.parentNode.lastChild;
         } else {
-          var html = originalHtml;
           var r = new RegExp('<!--\\s*STARTCHUNK_'+id+'.*?-->', 'g');
           var match = r.exec(html);
           var help = "";
@@ -100,42 +115,17 @@ Meteor.ui = Meteor.ui || {};
       var range = new Meteor.ui._LiveRange(Meteor.ui._tag, startNode, endNode);
       var chunk = newChunksById[id];
       if (chunk) {
-        chunk._range = range;
-        range.chunk = chunk;
+        chunk._gainRange(range);
+        materializedChunks.push(chunk);
       }
 
       return next;
     });
-  };
-
-  // XXX don't like the term "render" or the name "html_func"
-  // (which should only be used for Meteor.ui.render/chunk)
-  var renderFragment = function(func, withEvents) {
-
-    Meteor.ui._inRenderMode = true;
-
-    var html;
-    try {
-      html = func();
-    } finally {
-      Meteor.ui._inRenderMode = false;
-    }
-
-    var frag = Meteor.ui._htmlToFragment(html);
-    if (! frag.firstChild)
-      frag.appendChild(document.createComment("empty"));
-
-    walkRanges(frag, html);
-
-    _.each(newChunksById, function(chunk) {
-      if (chunk._range) {
-        chunk._send("added");
-        if (withEvents)
-          wireEvents(chunk);
-      }
-    });
 
     newChunksById = {};
+
+    if (chunkCallback)
+      _.each(materializedChunks, chunkCallback);
 
     return frag;
   };
@@ -466,18 +456,25 @@ Meteor.ui = Meteor.ui || {};
     }
   };
 
+  Chunk.prototype._gainRange = function(range) {
+    var self = this;
+    self._range = range;
+    range.chunk = self;
+    self._send("added");
+  };
+
   Chunk.prototype._asFragment = function() {
     var self = this;
-    var frag = renderFragment(function() {
+    var frag = materialize(function() {
       return self._asHtml();
-    }, true);
+    }, wireEvents);
     self._send("render");
     return frag;
   };
 
   Chunk.prototype.onupdate = function() {
     var self = this;
-    var frag = renderFragment(function() {
+    var frag = materialize(function() {
       return self._calculate();
     });
     Meteor.ui._intelligent_replace(self._range, frag);
