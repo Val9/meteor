@@ -97,7 +97,7 @@ Meteor.ui = Meteor.ui || {};
       var range = new Meteor.ui._LiveRange(Meteor.ui._tag, startNode, endNode);
       var chunk = idToChunk[id];
       if (chunk) {
-        chunk.range = range;
+        chunk._range = range;
         range.chunk = chunk;
         liveChunks.push(chunk);
       }
@@ -155,8 +155,7 @@ Meteor.ui = Meteor.ui || {};
 
   var renderChunk = function(chunk) {
     var frag = renderFragment(function() {
-      var html = chunk._init();
-      return html;
+      return chunk._init();
     }, true);
     chunk._send("render");
     return frag;
@@ -197,9 +196,9 @@ Meteor.ui = Meteor.ui || {};
 
     var insertFrag = function(frag, i) {
       if (i === docChunks.length)
-        docChunks[i-1].range.insert_after(frag);
+        docChunks[i-1]._range.insert_after(frag);
       else
-        docChunks[i].range.insert_before(frag);
+        docChunks[i]._range.insert_before(frag);
     };
 
     var handle = observable.observe({
@@ -211,7 +210,7 @@ Meteor.ui = Meteor.ui || {};
             var frag = renderChunk(addedChunk);
             if (elseChunk)
               // else case -> one item
-              outerChunk.range.replace_contents(frag);
+              outerChunk._range.replace_contents(frag);
             else
               insertFrag(frag, before_idx);
           }
@@ -228,11 +227,11 @@ Meteor.ui = Meteor.ui || {};
               // one item -> else case
               elseChunk = new Chunk(else_func);
               var frag = renderChunk(elseChunk);
-              outerChunk.range.replace_contents(frag);
+              outerChunk._range.replace_contents(frag);
             } else {
               // remove item
               var removedChunk = docChunks[at_idx];
-              removedChunk.range.extract();
+              removedChunk._range.extract();
             }
           }
 
@@ -250,7 +249,7 @@ Meteor.ui = Meteor.ui || {};
             // We know the list has at least two items,
             // at old_idx and new_idx, so `extract` will
             // succeed.
-            var frag = movedChunk.range.extract();
+            var frag = movedChunk._range.extract();
             // remove chunk from list at old index
           }
           docChunks.splice(old_idx, 1);
@@ -265,7 +264,7 @@ Meteor.ui = Meteor.ui || {};
       changed: function(doc, at_idx) {
         enqueue(function() {
           var chunk = docChunks[at_idx];
-          chunk.data = doc;
+          chunk._data = doc;
           if (outerChunk)
             chunk.update();
         });
@@ -402,10 +401,10 @@ Meteor.ui = Meteor.ui || {};
     // per type globally on the document.  However, the Old IE impl
     // takes advantage of it.
 
-    var range = chunk.range;
+    var range = chunk._range;
 
     for(var c = chunk; c; c = c.parentChunk()) {
-      var handlers = c.event_handlers;
+      var handlers = c._eventhandlers;
 
       if (handlers) {
         _.each(handlers.types, function(t) {
@@ -424,22 +423,17 @@ Meteor.ui = Meteor.ui || {};
   var Chunk = function(html_func, options) {
     var self = this;
 
-    self._htmlfunc = html_func;
+    options = options || {};
 
+    self._range = null;
+    self._htmlfunc = html_func;
     self._msgs = [];
     self._msgCx = null;
-
-    if (options) {
-      if (options.data)
-        self.data = options.data;
-
-      // backwards compatibility: event_data -> data
-      if (options.event_data)
-        self.data = options.event_data;
-
-      if (options.events)
-        self.event_handlers = unpackEventMap(options.events);
-    }
+    self._data = (options.data || options.event_data || null); // XXX
+    self._eventhandlers =
+      options.events ? unpackEventMap(options.events) : null;
+    self._killed = false;
+    self._context = null;
 
     // Allow Meteor.deps to signal us about a data change by
     // invalidating self._context.  By the time we see the
@@ -460,7 +454,7 @@ Meteor.ui = Meteor.ui || {};
     var self = this;
 
     var html = self._context.run(function() {
-      return self._calculateHtml();
+      return self.calculate();
     });
 
     if (typeof html !== "string")
@@ -487,26 +481,26 @@ Meteor.ui = Meteor.ui || {};
     self._msgs.push(message);
 
     var processMessage = function(msg) {
-      if (self.killed)
+      if (self._killed)
         return;
 
       // If chunk is not onscreen at flush time, any message
       // is treated like "kill".  All future messages will be
       // ignored.
-      if (msg === "kill" || (! self.range) || _checkOffscreen(self.range)) {
+      if (msg === "kill" || (! self._range) || _checkOffscreen(self._range)) {
         // Pronounce this chunk dead.  We rely on this finalization to clean
         // up the deps context, which is first created in the constructor.
         // There are many ways for a chunk to die -- never rendered, never
         // added to the DOM, removed as part of an update, removed
         // surreptitiously -- but all roads lead here.
-        self.killed = true;
+        self._killed = true;
         self._context.invalidate();
         self._context = null;
-        self.onkill();
+        self.onkill && self.onkill();
       } else if (msg === "added") {
         // This chunk is part of the document for the first time.
         wireEvents(self);
-        self.onadded();
+        self.onadded && self.onadded();
       } else if (msg === "update") {
         // Rerender this chunk in place, in whole or in part.
         self._context.run(function() {
@@ -537,7 +531,7 @@ Meteor.ui = Meteor.ui || {};
 
   Chunk.prototype.kill = function() {
     // schedule killing for flush time.
-    if (! this.killed)
+    if (! this._killed)
       this._send("kill");
   };
 
@@ -547,29 +541,26 @@ Meteor.ui = Meteor.ui || {};
     this._context.invalidate();
   };
 
-  Chunk.prototype.onkill = function() {};
-  Chunk.prototype.onadded = function() {};
-
-  Chunk.prototype._calculateHtml = function() {
-    return this._htmlfunc(this.data);
+  Chunk.prototype.calculate = function() {
+    return this._htmlfunc(this._data);
   };
 
   Chunk.prototype.onupdate = function() {
     var self = this;
     var frag = renderFragment(function() {
-      return self._calculateHtml();
+      return self.calculate();
     });
-    Meteor.ui._intelligent_replace(self.range, frag);
+    Meteor.ui._intelligent_replace(self._range, frag);
     self._send("render");
   };
 
 
   Chunk.prototype.childChunks = function() {
-    if (! this.range)
+    if (! this._range)
       throw new Error("Chunk not rendered yet");
 
     var chunks = [];
-    this.range.visit(function(is_start, r) {
+    this._range.visit(function(is_start, r) {
       if (! is_start)
         return false;
       if (! r.chunk)
@@ -582,10 +573,10 @@ Meteor.ui = Meteor.ui || {};
   };
 
   Chunk.prototype.parentChunk = function() {
-    if (! this.range)
+    if (! this._range)
       throw new Error("Chunk not rendered yet");
 
-    for(var r = this.range.findParent(); r; r = r.findParent())
+    for(var r = this._range.findParent(); r; r = r.findParent())
       if (r.chunk)
         return r.chunk;
 
@@ -603,7 +594,7 @@ Meteor.ui = Meteor.ui || {};
   };
 
   // Convert an event map from the developer into an internal
-  // format for range.event_handlers.  The internal format is
+  // format for range._eventhandlers.  The internal format is
   // an array of objects with properties {type, selector, callback}.
   // The array has an expando property `types`, which is a list
   // of all the unique event types used (as an optimization for
@@ -662,7 +653,7 @@ Meteor.ui = Meteor.ui || {};
     var type = event.type;
 
     for(var chunk = innerChunk; chunk; chunk = chunk.parentChunk()) {
-      var event_handlers = chunk.event_handlers;
+      var event_handlers = chunk._eventhandlers;
       if (! event_handlers)
         continue;
 
@@ -674,7 +665,7 @@ Meteor.ui = Meteor.ui || {};
 
         var selector = h.selector;
         if (selector) {
-          var contextNode = chunk.range.containerNode();
+          var contextNode = chunk._range.containerNode();
           var results = $(contextNode).find(selector);
           if (! _.contains(results, curNode))
             continue;
@@ -707,8 +698,8 @@ Meteor.ui = Meteor.ui || {};
     var innerChunk = Meteor.ui._findChunk(node);
 
     for(var chunk = innerChunk; chunk; chunk = chunk.parentChunk())
-      if (chunk.data)
-        return chunk.data;
+      if (chunk._data)
+        return chunk._data;
 
     return null;
   };
