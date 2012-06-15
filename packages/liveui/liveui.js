@@ -181,19 +181,8 @@ Meteor.ui = Meteor.ui || {};
     else_func = (typeof else_func === "function" ? else_func :
                  function() { return ""; });
 
-    var makeDocChunk = function(doc) {
-      var chunk = new Chunk(
-        doc_func, {data: function() { return this.doc; }});
-      chunk.doc = doc;
-      return chunk;
-    };
-
-    var makeElseChunk = function() {
-      return new Chunk(else_func);
-    };
-
     var docChunks = [];
-    var elseChunk = makeElseChunk();
+    var elseChunk = new Chunk(else_func);
     var outerChunk = null;
 
     var queuedUpdates = [];
@@ -216,11 +205,9 @@ Meteor.ui = Meteor.ui || {};
     var handle = observable.observe({
       added: function(doc, before_idx) {
         enqueue(function() {
-          var addedChunk = makeDocChunk(doc);
+          var addedChunk = new Chunk(doc_func, {data: doc});
 
           if (outerChunk) {
-            console.log(doc);
-            debugger;
             var frag = renderChunk(addedChunk);
             if (elseChunk)
               // else case -> one item
@@ -239,7 +226,7 @@ Meteor.ui = Meteor.ui || {};
           if (outerChunk) {
             if (docChunks.length === 1) {
               // one item -> else case
-              elseChunk = makeElseChunk();
+              elseChunk = new Chunk(else_func);
               var frag = renderChunk(elseChunk);
               outerChunk.range.replace_contents(frag);
             } else {
@@ -278,7 +265,7 @@ Meteor.ui = Meteor.ui || {};
       changed: function(doc, at_idx) {
         enqueue(function() {
           var chunk = docChunks[at_idx];
-          chunk.doc = doc;
+          chunk.data = doc;
           if (outerChunk)
             chunk.update();
         });
@@ -454,12 +441,6 @@ Meteor.ui = Meteor.ui || {};
         self.event_handlers = unpackEventMap(options.events);
     }
 
-    // make self.data() a function if it isn't
-    if (typeof self.data !== "function") {
-      var constantData = self.data;
-      self.data = function() { return constantData; };
-    }
-
     // Allow Meteor.deps to signal us about a data change by
     // invalidating self._context.  By the time we see the
     // invalidation, it's flush time.  We immediately set up
@@ -570,7 +551,7 @@ Meteor.ui = Meteor.ui || {};
   Chunk.prototype.onadded = function() {};
 
   Chunk.prototype._calculateHtml = function() {
-    return this._htmlfunc(this.data());
+    return this._htmlfunc(this.data);
   };
 
   Chunk.prototype.onupdate = function() {
@@ -725,11 +706,9 @@ Meteor.ui = Meteor.ui || {};
   var findEventData = function(node) {
     var innerChunk = Meteor.ui._findChunk(node);
 
-    for(var chunk = innerChunk; chunk; chunk = chunk.parentChunk()) {
-      var data = chunk.data();
-      if (data)
-        return data;
-    }
+    for(var chunk = innerChunk; chunk; chunk = chunk.parentChunk())
+      if (chunk.data)
+        return chunk.data;
 
     return null;
   };
