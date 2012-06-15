@@ -333,37 +333,6 @@ Meteor.ui = Meteor.ui || {};
     }
   };
 
-  // Performs a replacement by determining which nodes should
-  // be preserved and invoking Meteor.ui._Patcher as appropriate.
-  Meteor.ui._intelligent_replace = function(tgtRange, srcParent) {
-
-    // Table-body fix:  if tgtRange is in a table and srcParent
-    // contains a TR, wrap fragment in a TBODY on all browsers,
-    // so that it will display properly in IE.
-    if (tgtRange.containerNode().nodeName === "TABLE" &&
-        _.any(srcParent.childNodes,
-              function(n) { return n.nodeName === "TR"; })) {
-      var tbody = document.createElement("TBODY");
-      while (srcParent.firstChild)
-        tbody.appendChild(srcParent.firstChild);
-      srcParent.appendChild(tbody);
-    }
-
-    var copyFunc = function(t, s) {
-      Meteor.ui._LiveRange.transplant_tag(Meteor.ui._tag, t, s);
-    };
-
-    tgtRange.operate(function(start, end) {
-      // clear all LiveRanges on target
-      cleanup_range(new Meteor.ui._LiveRange(Meteor.ui._tag, start, end));
-
-      var patcher = new Meteor.ui._Patcher(
-        start.parentNode, srcParent,
-        start.previousSibling, end.nextSibling);
-      patcher.diffpatch(copyFunc);
-    });
-  };
-
   var wireEvents = function(chunk, andEnclosing) {
     // Attach events to top-level nodes in `chunk` as specified
     // by its event handlers.
@@ -477,7 +446,38 @@ Meteor.ui = Meteor.ui || {};
     var frag = materialize(function() {
       return self._calculate();
     });
-    Meteor.ui._intelligent_replace(self._range, frag);
+
+    // DIFF/PATCH
+
+    var range = self._range;
+
+    // Table-body fix:  if tgtRange is in a table and srcParent
+    // contains a TR, wrap fragment in a TBODY on all browsers,
+    // so that it will display properly in IE.
+    if (range.containerNode().nodeName === "TABLE" &&
+        _.any(frag.childNodes,
+              function(n) { return n.nodeName === "TR"; })) {
+      var tbody = document.createElement("TBODY");
+      while (frag.firstChild)
+        tbody.appendChild(frag.firstChild);
+      frag.appendChild(tbody);
+    }
+
+    var copyFunc = function(t, s) {
+      Meteor.ui._LiveRange.transplant_tag(Meteor.ui._tag, t, s);
+    };
+
+    range.operate(function(start, end) {
+      // clear all LiveRanges on target
+      // XXX do this in terms of chunks
+      cleanup_range(new Meteor.ui._LiveRange(Meteor.ui._tag, start, end));
+
+      var patcher = new Meteor.ui._Patcher(
+        start.parentNode, frag,
+        start.previousSibling, end.nextSibling);
+      patcher.diffpatch(copyFunc);
+    });
+
     self._send("render");
   };
 
